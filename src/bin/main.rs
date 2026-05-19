@@ -9,36 +9,30 @@
 
 use embassy_executor::Spawner;
 use embassy_time::Timer;
-
+use embedded_hal_bus::spi::ExclusiveDevice;
 use esp_hal::clock::CpuClock;
-use esp_hal::timer::timg::TimerGroup;
-use esp_hal::timer::OneShotTimer;
-use esp_hal::gpio::{ Level, Output, OutputConfig};
 use esp_hal::gpio::DriveMode;
+use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::ledc::{
-    channel,
-    channel::ChannelIFace,
-    timer,
-    timer::TimerIFace,
-    Ledc,
-    LSGlobalClkSource,
-    LowSpeed,
+    LSGlobalClkSource, Ledc, LowSpeed, channel, channel::ChannelIFace, timer, timer::TimerIFace,
 };
+use esp_hal::delay::Delay;
+use esp_hal::timer::OneShotTimer;
+use esp_hal::timer::timg::TimerGroup;
 
-use esp_hal::analog::adc::{
-    Adc,
-    AdcConfig,
-    Attenuation,
-};
-use esp_hal::peripherals::ADC1;
+use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};
+use esp_hal::peripherals::{self, ADC1, GPIO12};
 use esp_println::println;
 
 use esp_hal::peripherals::GPIO7;
 use esp_hal::time::Rate;
-
+use esp_hal::spi::{
+    Mode,
+    master::{Config, Spi},
+};
 #[allow(unused_imports)]
 use esp_radio::ble::controller::BleConnector;
-use log::{error, info, log, Level as LogLevel};
+use log::{Level as LogLevel, error, info, log};
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -56,37 +50,31 @@ esp_bootloader_esp_idf::esp_app_desc!();
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
-
 #[embassy_executor::task]
-async fn adc_read( adc1: ADC1<'static>,  adc_pin: GPIO7<'static>) {  // takes ownership of the pin
-  
+async fn adc_read(adc1: ADC1<'static>, adc_pin: GPIO7<'static>) {
+    // takes ownership of the pin
+
     let mut adc1_config = AdcConfig::new();
     let mut pin = adc1_config.enable_pin(adc_pin, Attenuation::_11dB);
     let mut adc1 = Adc::new(adc1, adc1_config);
 
     let mut value;
-    
-    loop {
 
+    loop {
         let mut total: u32 = 0;
 
         for _ in 0..32 {
             value = match adc1.read_oneshot(&mut pin) {
-                Ok(val) => {
-                    val
-                }, 
-                Err(_) => {
-                    0
-                }
+                Ok(val) => val,
+                Err(_) => 0,
             };
 
-            total += value as u32; 
+            total += value as u32;
         }
 
         let avg = total / 32;
         println!("{}", avg);
         Timer::after_millis(10).await;
-        
     }
 }
 
@@ -99,28 +87,27 @@ async fn main(spawner: Spawner) -> ! {
 
     esp_println::logger::init_logger_from_env();
 
-
     //configuration and initialisation of built in hardware
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+    
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
     // COEX needs more RAM - so we've added some more
     esp_alloc::heap_allocator!(size: 64 * 1024);
 
     //embassy needs a hardware timer to schedule tasks
-    //it also uses a software interrupt to switch between tasks, the interrupt wakes it up. 
+    //it also uses a software interrupt to switch between tasks, the interrupt wakes it up.
     //embassy is like axum or tokio.
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-   
-    let mut one_shot = OneShotTimer::new(timg0.timer1);
+
     let sw_interrupt =
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     info!("Embassy initialized!");
 
-    ////initialise the wifi peripheral 
+    ////initialise the wifi peripheral
     // let (mut _wifi_controller, _interfaces) =
     //     esp_radio::wifi::new(peripherals.WIFI, Default::default())
     //         .expect("Failed to initialize Wi-Fi controller");
@@ -129,43 +116,63 @@ async fn main(spawner: Spawner) -> ! {
     // TODO: Spawn some tasks
     let task_spawner = spawner;
 
+    //pin definitions
+    //led
+    let led_pwm_pin = peripherals.GPIO4;
 
+    //LCD screen 
+    let lcd_brightness_level_pin = Output::new(peripherals.GPIO9,Level::High,OutputConfig::default());
+    let lcd_chip_select_pin = peripherals.GPIO10;
+    let lcd_din_pin = peripherals.GPIO11;
+    let lcd_clock_pin = peripherals.GPIO12;
+    let lcd_reset_pin = Output::new(peripherals.GPIO13,Level::Low,OutputConfig::default());
+    let lcd_data_command_pin = Output::new(peripherals.GPIO14,Level::Low,OutputConfig::default());
+    let delay = Delay::new(); 
+    
+    //initialise peripheral 
+    let mut spi = Spi::new(
+        peripherals.SPI2,
+        Config::default()
+            .with_frequency(Rate::from_mhz(1))
+            .with_mode(Mode::_0),
+    )
+        .unwrap()
+        .with_sck(lcd_clock_pin)
+        .with_mosi(lcd_din_pin)
+        .with_cs(lcd_chip_select_pin);
+        //.with_miso(peripherals.GPIO2);
+    
 
-    // let mut adc1_config = AdcConfig::new();
-    // let mut adc_pin = adc1_config.enable_pin(peripherals.GPIO2, Attenuation::_11dB);
-    // let mut adc1 = Adc::new(peripherals.ADC1, adc1_config);
-
-    //led PWM 
-    // - low 0x6001_9000  
-    // - high 0x6001_9FFF  
-    let led_pwm_pin = Output::new(peripherals.GPIO4, Level::High, OutputConfig::default());
-
+    //led PWM
+    let led_pwm_pin = Output::new(led_pwm_pin, Level::High, OutputConfig::default());
 
     //get the singleton
     let mut ledc = Ledc::new(peripherals.LEDC);
 
-    //use the singleton 
+    //use the singleton
     ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
 
     let mut lstimer0 = ledc.timer::<LowSpeed>(timer::Number::Timer0);
-    lstimer0.configure(timer::config::Config {
-        duty: timer::config::Duty::Duty5Bit,
-        clock_source: timer::LSClockSource::APBClk,
-        frequency: Rate::from_khz(24),
-    }).unwrap();
+    lstimer0
+        .configure(timer::config::Config {
+            duty: timer::config::Duty::Duty5Bit,
+            clock_source: timer::LSClockSource::APBClk,
+            frequency: Rate::from_khz(24),
+        })
+        .unwrap();
 
     let mut channel0 = ledc.channel(channel::Number::Channel0, led_pwm_pin);
-    channel0.configure(channel::config::Config {
-        timer: &lstimer0,
-        duty_pct: 10,
-        drive_mode: DriveMode::PushPull,
-    }).unwrap();
+    channel0
+        .configure(channel::config::Config {
+            timer: &lstimer0,
+            duty_pct: 10,
+            drive_mode: DriveMode::PushPull,
+        })
+        .unwrap();
 
-
-    task_spawner.spawn(adc_read(peripherals.ADC1,peripherals.GPIO7).unwrap());
+    task_spawner.spawn(adc_read(peripherals.ADC1, peripherals.GPIO7).unwrap());
 
     loop {
-  
         channel0.set_duty(0).unwrap();
         Timer::after_millis(1000).await;
         channel0.set_duty(20).unwrap();
@@ -178,8 +185,5 @@ async fn main(spawner: Spawner) -> ! {
         Timer::after_millis(1000).await;
         channel0.set_duty(100).unwrap();
         Timer::after_millis(1000).await;
-        // info!("Running");
     }
-
-    // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.1.0/examples
 }
