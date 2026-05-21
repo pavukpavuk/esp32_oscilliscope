@@ -9,8 +9,8 @@
 
 use embassy_executor::Spawner;
 
-use embassy_time::{Duration, Timer};
 use core::future::pending;
+use embassy_time::{Duration, Timer};
 
 use esp_hal::clock::CpuClock;
 use esp_hal::delay::Delay;
@@ -23,7 +23,7 @@ use esp_hal::ledc::{
 use esp_hal::timer::timg::TimerGroup;
 
 use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};
-use esp_hal::peripherals::{ ADC1,GPIO7,GPIO4, LEDC };
+use esp_hal::peripherals::{ADC1, GPIO4, GPIO7, LEDC};
 use esp_println::println;
 
 use esp_hal::spi::{
@@ -51,7 +51,6 @@ fn panic(panic_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-
 use heapless::Vec;
 
 extern crate alloc;
@@ -77,13 +76,13 @@ async fn adc_read(adc1: ADC1<'static>, adc_pin: GPIO7<'static>) {
     //320px = 4095 adc output
     //0px = 0 adc output
     const GRAPH_Y_HEIGHT: u32 = 240;
-    let mut samples: Vec<u32, 320 > = Vec::new();
+    let mut samples: Vec<u32, 320> = Vec::new();
     let mut graph_y_points: Vec<u32, 240> = Vec::new();
 
     samples.push(2).unwrap();
     samples.fill(0);
 
-    println!("length: {}",samples.len());
+    println!("length: {}", samples.len());
 
     loop {
         let mut total: u32 = 0;
@@ -98,7 +97,7 @@ async fn adc_read(adc1: ADC1<'static>, adc_pin: GPIO7<'static>) {
         }
 
         let avg = total / 32;
-        let normalised_adc = 1/avg;
+        let normalised_adc = 1 / avg;
         // match graph_y_points.push(normalised_adc * GRAPH_Y_HEIGHT) {
         //     Ok(_) => {},
         //     Err(item) => {
@@ -113,8 +112,7 @@ async fn adc_read(adc1: ADC1<'static>, adc_pin: GPIO7<'static>) {
 }
 
 #[embassy_executor::task]
-async fn fade_led(led_pwm_pin: GPIO4<'static>,ledc: LEDC<'static>){
-    
+async fn fade_led(led_pwm_pin: GPIO4<'static>, ledc: LEDC<'static>) {
     //led PWM
     let led_pwm_pin = Output::new(led_pwm_pin, Level::High, OutputConfig::default());
 
@@ -142,8 +140,7 @@ async fn fade_led(led_pwm_pin: GPIO4<'static>,ledc: LEDC<'static>){
         })
         .unwrap();
 
-    loop{
-        
+    loop {
         channel0.set_duty(0).unwrap();
         Timer::after_millis(1000).await;
         channel0.set_duty(20).unwrap();
@@ -156,7 +153,6 @@ async fn fade_led(led_pwm_pin: GPIO4<'static>,ledc: LEDC<'static>){
         Timer::after_millis(1000).await;
         channel0.set_duty(100).unwrap();
         Timer::after_millis(1000).await;
-    
     }
 }
 
@@ -174,9 +170,6 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
     // COEX needs more RAM - so we've added some more
     esp_alloc::heap_allocator!(size: 64 * 1024);
-
-
-    
 
     //embassy needs a hardware timer to schedule tasks
     //it also uses a software interrupt to switch between tasks, the interrupt wakes it up.
@@ -199,9 +192,10 @@ async fn main(spawner: Spawner) -> ! {
     let task_spawner = spawner;
 
     //pin definitions
-   
+
     //LCD screen
-    let _lcd_brightness_level_pin = Output::new(peripherals.GPIO9, Level::High, OutputConfig::default());
+    let _lcd_brightness_level_pin =
+        Output::new(peripherals.GPIO9, Level::High, OutputConfig::default());
     let lcd_chip_select_pin = Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
     let lcd_din_pin = peripherals.GPIO11;
     let lcd_clock_pin = peripherals.GPIO12;
@@ -220,13 +214,12 @@ async fn main(spawner: Spawner) -> ! {
     .with_sck(lcd_clock_pin)
     .with_mosi(lcd_din_pin);
 
-
     let spi_device = ExclusiveDevice::new_no_delay(spi, lcd_chip_select_pin).unwrap();
     let mut buffer = [0_u8; 512];
     let di = SpiInterface::new(spi_device, lcd_data_command_pin, &mut buffer);
 
-    const DISPLAY_WIDTH  :u32 = 320;
-    const DISPLAY_HEIGHT :u32 = 240;
+    const DISPLAY_WIDTH: u32 = 320;
+    const DISPLAY_HEIGHT: u32 = 240;
 
     let mut display = Builder::new(ST7789, di)
         .display_size(DISPLAY_HEIGHT as u16, DISPLAY_WIDTH as u16)
@@ -235,17 +228,10 @@ async fn main(spawner: Spawner) -> ! {
         .unwrap();
     display.clear(Rgb565::CSS_PURPLE).unwrap();
 
-    
-
-
     task_spawner.spawn(fade_led(peripherals.GPIO4, peripherals.LEDC).unwrap());
     task_spawner.spawn(adc_read(peripherals.ADC1, peripherals.GPIO7).unwrap());
 
     loop {
-    
         Timer::after(Duration::from_millis(300)).await;
-      
-     
-        
     }
 }
