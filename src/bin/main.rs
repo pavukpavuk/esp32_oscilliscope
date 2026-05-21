@@ -9,14 +9,14 @@
 
 use embassy_executor::Spawner;
 use embassy_time::Timer;
-use embedded_hal_bus::spi::ExclusiveDevice;
+
 use esp_hal::clock::CpuClock;
+use esp_hal::delay::Delay;
 use esp_hal::gpio::DriveMode;
 use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::ledc::{
     LSGlobalClkSource, Ledc, LowSpeed, channel, channel::ChannelIFace, timer, timer::TimerIFace,
 };
-use esp_hal::delay::Delay;
 use esp_hal::timer::OneShotTimer;
 use esp_hal::timer::timg::TimerGroup;
 
@@ -25,14 +25,24 @@ use esp_hal::peripherals::{self, ADC1, GPIO12};
 use esp_println::println;
 
 use esp_hal::peripherals::GPIO7;
-use esp_hal::time::Rate;
 use esp_hal::spi::{
     Mode,
     master::{Config, Spi},
 };
+use esp_hal::time::Rate;
 #[allow(unused_imports)]
 use esp_radio::ble::controller::BleConnector;
 use log::{Level as LogLevel, error, info, log};
+
+use embedded_graphics::{
+    mono_font::{MonoTextStyle, ascii::FONT_10X20},
+    pixelcolor::Rgb565,
+    prelude::*,
+    text::Text,
+};
+use embedded_hal_bus::spi::ExclusiveDevice;
+use mipidsi::interface::SpiInterface;
+use mipidsi::{Builder, models::ST7789, options::ColorInversion};
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -78,8 +88,6 @@ async fn adc_read(adc1: ADC1<'static>, adc_pin: GPIO7<'static>) {
     }
 }
 
-
-
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     // generator version: 1.3.0
@@ -90,7 +98,6 @@ async fn main(spawner: Spawner) -> ! {
     //configuration and initialisation of built in hardware
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
-    
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
     // COEX needs more RAM - so we've added some more
@@ -120,28 +127,40 @@ async fn main(spawner: Spawner) -> ! {
     //led
     let led_pwm_pin = peripherals.GPIO4;
 
-    //LCD screen 
-    let lcd_brightness_level_pin = Output::new(peripherals.GPIO9,Level::High,OutputConfig::default());
-    let lcd_chip_select_pin = peripherals.GPIO10;
+    //LCD screen
+    let lcd_brightness_level_pin =
+        Output::new(peripherals.GPIO9, Level::High, OutputConfig::default());
+    let lcd_chip_select_pin = Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
     let lcd_din_pin = peripherals.GPIO11;
     let lcd_clock_pin = peripherals.GPIO12;
-    let lcd_reset_pin = Output::new(peripherals.GPIO13,Level::Low,OutputConfig::default());
-    let lcd_data_command_pin = Output::new(peripherals.GPIO14,Level::Low,OutputConfig::default());
-    let delay = Delay::new(); 
-    
-    //initialise peripheral 
+    let lcd_reset_pin = Output::new(peripherals.GPIO13, Level::High, OutputConfig::default());
+    let lcd_data_command_pin = Output::new(peripherals.GPIO14, Level::Low, OutputConfig::default());
+    let mut delay = Delay::new();
+
+    //initialise peripheral
     let mut spi = Spi::new(
         peripherals.SPI2,
         Config::default()
             .with_frequency(Rate::from_mhz(1))
             .with_mode(Mode::_0),
     )
-        .unwrap()
-        .with_sck(lcd_clock_pin)
-        .with_mosi(lcd_din_pin)
-        .with_cs(lcd_chip_select_pin);
-        //.with_miso(peripherals.GPIO2);
-    
+    .unwrap()
+    .with_sck(lcd_clock_pin)
+    .with_mosi(lcd_din_pin);
+    //.with_cs(lcd_chip_select_pin);
+    //.with_miso(peripherals.GPIO2);
+
+    let spi_device = ExclusiveDevice::new_no_delay(spi, lcd_chip_select_pin).unwrap();
+    let mut buffer = [0_u8; 512];
+    let di = SpiInterface::new(spi_device, lcd_data_command_pin, &mut buffer);
+
+    let mut display = Builder::new(ST7789, di)
+        .display_size(240 as u16, 320 as u16)
+        .invert_colors(ColorInversion::Inverted)
+        .init(&mut delay)
+        .unwrap();
+
+    display.clear(Rgb565::BLUE).unwrap();
 
     //led PWM
     let led_pwm_pin = Output::new(led_pwm_pin, Level::High, OutputConfig::default());
