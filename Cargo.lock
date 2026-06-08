@@ -1542,6 +1542,7 @@ dependencies = [
  "critical-section",
  "embassy-executor",
  "embassy-net",
+ "embassy-sync 0.8.0",
  "embassy-time",
  "embedded-graphics",
  "embedded-hal-bus",

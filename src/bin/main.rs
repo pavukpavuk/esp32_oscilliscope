@@ -8,6 +8,8 @@
 #![deny(clippy::large_stack_frames)]
 
 use embassy_executor::Spawner;
+use embassy_sync::channel::{Channel, Sender, Receiver};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 use core::future::pending;
 use embassy_time::{Duration, Timer};
@@ -42,8 +44,15 @@ use embedded_graphics::{
     text::Text,
 };
 use embedded_hal_bus::spi::ExclusiveDevice;
-use mipidsi::interface::SpiInterface;
-use mipidsi::{Builder, models::ST7789, options::ColorInversion};
+
+use mipidsi::{
+    Builder,
+    models::ST7789, 
+    options::ColorInversion,
+    interface::SpiInterface,
+    options::Orientation,
+    options::Rotation
+};
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -59,12 +68,19 @@ extern crate alloc;
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
 
+const DISPLAY_WIDTH: u32 = 320;
+const DISPLAY_HEIGHT: u32 = 240;
+
+const SAMPLE_BUFFER_SIZE: usize = DISPLAY_WIDTH as usize;
+//static ADC_CHANNEL: Channel<CriticalSectionRawMutex, [u16; SAMPLE_BUFFER_SIZE], 2> = Channel::new();
+static ADC_CHANNEL: Channel<CriticalSectionRawMutex, u16, 1> = Channel::new();
+
 #[allow(
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
 #[embassy_executor::task]
-async fn adc_read(adc1: ADC1<'static>, adc_pin: GPIO7<'static>) {
+async fn adc_read(adc1: ADC1<'static>, adc_pin: GPIO7<'static>, sender: Sender<'static, CriticalSectionRawMutex, u16, 1>) {
     // takes ownership of the pin
 
     let mut adc1_config = AdcConfig::new();
@@ -76,13 +92,13 @@ async fn adc_read(adc1: ADC1<'static>, adc_pin: GPIO7<'static>) {
     //320px = 4095 adc output
     //0px = 0 adc output
     const GRAPH_Y_HEIGHT: u32 = 240;
-    let mut samples: Vec<u32, 320> = Vec::new();
-    let mut graph_y_points: Vec<u32, 240> = Vec::new();
+    let mut samples = [0u16; SAMPLE_BUFFER_SIZE as usize];
+    
+    
+    let mut graph_y_points = [0u16; GRAPH_Y_HEIGHT as usize];
 
-    samples.push(2).unwrap();
-    samples.fill(0);
 
-    println!("length: {}", samples.len());
+    //println!("length: {}", samples.len());
 
     loop {
         let mut total: u32 = 0;
@@ -97,8 +113,10 @@ async fn adc_read(adc1: ADC1<'static>, adc_pin: GPIO7<'static>) {
         }
 
         let avg = total / 32;
-        let normalised_adc = 1 / avg;
-        // match graph_y_points.push(normalised_adc * GRAPH_Y_HEIGHT) {
+        let normalised_adc: f32 = 1.0 / avg as f32;
+        let graph_y_point: f32 = normalised_adc * GRAPH_Y_HEIGHT as f32;
+        let graph_y_point = graph_y_point * GRAPH_Y_HEIGHT as f32;
+        // match graph_y_points.push(graph_y_point) {
         //     Ok(_) => {},
         //     Err(item) => {
         //         //send all samples to drawing function
@@ -106,7 +124,8 @@ async fn adc_read(adc1: ADC1<'static>, adc_pin: GPIO7<'static>) {
 
         //     }
         // }
-        // println!("{}", avg);
+        // println!("{}", graph_y_point);
+        sender.send(graph_y_point as u16).await;
         Timer::after_millis(10).await;
     }
 }
@@ -194,7 +213,7 @@ async fn main(spawner: Spawner) -> ! {
     //pin definitions
 
     //LCD screen
-    let _lcd_brightness_level_pin =
+    let lcd_brightness_level_pin =
         Output::new(peripherals.GPIO9, Level::High, OutputConfig::default());
     let lcd_chip_select_pin = Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
     let lcd_din_pin = peripherals.GPIO11;
@@ -217,21 +236,43 @@ async fn main(spawner: Spawner) -> ! {
     let spi_device = ExclusiveDevice::new_no_delay(spi, lcd_chip_select_pin).unwrap();
     let mut buffer = [0_u8; 512];
     let di = SpiInterface::new(spi_device, lcd_data_command_pin, &mut buffer);
+    
 
-    const DISPLAY_WIDTH: u32 = 320;
-    const DISPLAY_HEIGHT: u32 = 240;
+    
 
     let mut display = Builder::new(ST7789, di)
         .display_size(DISPLAY_HEIGHT as u16, DISPLAY_WIDTH as u16)
         .invert_colors(ColorInversion::Inverted)
+        .orientation(Orientation::new().rotate(Rotation::Deg90))
         .init(&mut delay)
         .unwrap();
-    display.clear(Rgb565::CSS_PURPLE).unwrap();
+    display.clear(Rgb565::BLACK).unwrap();
 
     task_spawner.spawn(fade_led(peripherals.GPIO4, peripherals.LEDC).unwrap());
-    task_spawner.spawn(adc_read(peripherals.ADC1, peripherals.GPIO7).unwrap());
+
+    let sender = ADC_CHANNEL.sender();
+    let receiver = ADC_CHANNEL.receiver();
+    task_spawner.spawn(adc_read(peripherals.ADC1, peripherals.GPIO7, sender).unwrap()); 
+ 
+
+    let mut sample_x = DISPLAY_WIDTH/2;
+    let sample_y = DISPLAY_HEIGHT/2;
+
 
     loop {
-        Timer::after(Duration::from_millis(300)).await;
+       
+        
+        let sample_y: u16 = receiver.receive().await;
+        display.set_pixel(sample_x as u16,sample_y as u16,Rgb565::GREEN );
+        Timer::after(Duration::from_millis(3)).await;
+        let sample_x_prev = sample_x; 
+        let sample_y_prev = sample_y;
+
+        println!("{}", sample_y);
+        if sample_x > DISPLAY_WIDTH {
+            sample_x = 0;
+        }
+
+        display.set_pixel(sample_x_prev as u16,sample_y_prev as u16,Rgb565::BLACK );
     }
 }
