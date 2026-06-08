@@ -38,6 +38,7 @@ use esp_radio::ble::controller::BleConnector;
 use log::{error, info};
 
 use embedded_graphics::{
+    primitives::{Line, PrimitiveStyle},
     mono_font::{MonoTextStyle, ascii::FONT_10X20},
     pixelcolor::Rgb565,
     prelude::*,
@@ -73,14 +74,14 @@ const DISPLAY_HEIGHT: u32 = 240;
 
 const SAMPLE_BUFFER_SIZE: usize = DISPLAY_WIDTH as usize;
 //static ADC_CHANNEL: Channel<CriticalSectionRawMutex, [u16; SAMPLE_BUFFER_SIZE], 2> = Channel::new();
-static ADC_CHANNEL: Channel<CriticalSectionRawMutex, u16, 1> = Channel::new();
+static ADC_CHANNEL: Channel<CriticalSectionRawMutex, [u16; SAMPLE_BUFFER_SIZE], 2> = Channel::new();
 
 #[allow(
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
 #[embassy_executor::task]
-async fn adc_read(adc1: ADC1<'static>, adc_pin: GPIO7<'static>, sender: Sender<'static, CriticalSectionRawMutex, u16, 1>) {
+async fn adc_read(adc1: ADC1<'static>, adc_pin: GPIO7<'static>, sender: Sender<'static, CriticalSectionRawMutex, [u16; SAMPLE_BUFFER_SIZE], 2>) {
     // takes ownership of the pin
 
     let mut adc1_config = AdcConfig::new();
@@ -91,6 +92,7 @@ async fn adc_read(adc1: ADC1<'static>, adc_pin: GPIO7<'static>, sender: Sender<'
 
     //320px = 4095 adc output
     //0px = 0 adc output
+    const ADC_MAX: f32 = 4095.0;
     const GRAPH_Y_HEIGHT: u32 = 240;
     let mut samples = [0u16; SAMPLE_BUFFER_SIZE as usize];
     
@@ -101,31 +103,36 @@ async fn adc_read(adc1: ADC1<'static>, adc_pin: GPIO7<'static>, sender: Sender<'
     //println!("length: {}", samples.len());
 
     loop {
-        let mut total: u32 = 0;
+        
+        for i in 0..SAMPLE_BUFFER_SIZE{
+            
+            
+            let mut total: u32 = 0;
+            for _ in 0..32 {
+                value = match adc1.read_oneshot(&mut pin) {
+                    Ok(val) => val,
+                    Err(_) => 0,
+                };
 
-        for _ in 0..32 {
-            value = match adc1.read_oneshot(&mut pin) {
-                Ok(val) => val,
-                Err(_) => 0,
-            };
+                total += value as u32;
+            }
 
-            total += value as u32;
+            let avg = total / 32;
+            let normalised_adc: f32 = 1.0 / avg as f32;
+            let graph_y_point: f32 = normalised_adc * GRAPH_Y_HEIGHT as f32;
+            let mut graph_y_point = graph_y_point * GRAPH_Y_HEIGHT as f32;
+
+            if graph_y_point as u32 > GRAPH_Y_HEIGHT  {
+                graph_y_point = GRAPH_Y_HEIGHT as f32;
+            }
+
+            samples[i] = graph_y_point as u16;
         }
+   
+        // println!("{:#?}", samples);
 
-        let avg = total / 32;
-        let normalised_adc: f32 = 1.0 / avg as f32;
-        let graph_y_point: f32 = normalised_adc * GRAPH_Y_HEIGHT as f32;
-        let graph_y_point = graph_y_point * GRAPH_Y_HEIGHT as f32;
-        // match graph_y_points.push(graph_y_point) {
-        //     Ok(_) => {},
-        //     Err(item) => {
-        //         //send all samples to drawing function
-        //         //clear samples
-
-        //     }
-        // }
-        // println!("{}", graph_y_point);
-        sender.send(graph_y_point as u16).await;
+        sender.send(samples).await;
+        // Timer::after_nanos(10).await;
         Timer::after_millis(10).await;
     }
 }
@@ -161,17 +168,35 @@ async fn fade_led(led_pwm_pin: GPIO4<'static>, ledc: LEDC<'static>) {
 
     loop {
         channel0.set_duty(0).unwrap();
-        Timer::after_millis(1000).await;
+        Timer::after_millis(10000).await;
         channel0.set_duty(20).unwrap();
-        Timer::after_millis(1000).await;
+        Timer::after_millis(10000).await;
         channel0.set_duty(40).unwrap();
-        Timer::after_millis(1000).await;
+        Timer::after_millis(10000).await;
         channel0.set_duty(60).unwrap();
-        Timer::after_millis(1000).await;
+        Timer::after_millis(10000).await;
         channel0.set_duty(80).unwrap();
-        Timer::after_millis(1000).await;
+        Timer::after_millis(10000).await;
         channel0.set_duty(100).unwrap();
-        Timer::after_millis(1000).await;
+        Timer::after_millis(10000).await;
+     
+        // match channel0.start_duty_fade(100, 0, 1000) {
+        //     Ok(_) => println!("Fade started"),
+        //     Err(e) => println!("Fade error: {:?}", e),
+        // }
+        
+        // while channel0.is_duty_fade_running() {
+        //     Timer::after_millis(1).await;
+        // }
+        
+        // match channel0.start_duty_fade(0, 100, 1000) {
+        //     Ok(_) => println!("Fade started"),
+        //     Err(e) => println!("Fade error: {:?}", e),
+        // }
+        // while channel0.is_duty_fade_running() {
+        //     Timer::after_millis(1).await;
+        // }
+        
     }
 }
 
@@ -226,7 +251,7 @@ async fn main(spawner: Spawner) -> ! {
     let spi = Spi::new(
         peripherals.SPI2,
         Config::default()
-            .with_frequency(Rate::from_mhz(8))
+            .with_frequency(Rate::from_mhz(80))
             .with_mode(Mode::_0),
     )
     .unwrap()
@@ -255,24 +280,55 @@ async fn main(spawner: Spawner) -> ! {
     task_spawner.spawn(adc_read(peripherals.ADC1, peripherals.GPIO7, sender).unwrap()); 
  
 
-    let mut sample_x = DISPLAY_WIDTH/2;
-    let sample_y = DISPLAY_HEIGHT/2;
+    let mut sample_x = 0;
+    let sample_y = 0;
 
+    let mut prev_x = 0u16;
+    let mut prev_y = 0;
+    let mut prev_samples = [0u16; 320];
 
     loop {
-       
+        display.clear(Rgb565::BLACK);
         
-        let sample_y: u16 = receiver.receive().await;
-        display.set_pixel(sample_x as u16,sample_y as u16,Rgb565::GREEN );
-        Timer::after(Duration::from_millis(3)).await;
-        let sample_x_prev = sample_x; 
-        let sample_y_prev = sample_y;
+        // let sample_y: u16 = receiver.receive().await;
+        let samples = receiver.receive().await;
 
-        println!("{}", sample_y);
-        if sample_x > DISPLAY_WIDTH {
-            sample_x = 0;
+        for (x, y) in prev_samples.iter().enumerate() {
+            let current_y = *y;
+
+            Line::new(
+                Point::new(prev_x as i32, prev_y as i32),
+                Point::new(x as i32, current_y as i32),
+            )
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 1))
+            .draw(&mut display)
+            .unwrap();
+
+            prev_x = x as u16;
+            prev_y = current_y;
         }
 
-        display.set_pixel(sample_x_prev as u16,sample_y_prev as u16,Rgb565::BLACK );
+       
+        for (x, y) in samples.iter().enumerate() {
+            let current_y = *y;
+
+            Line::new(
+                Point::new(prev_x as i32, prev_y as i32),
+                Point::new(x as i32, current_y as i32),
+            )
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::GREEN, 1))
+            .draw(&mut display)
+            .unwrap();
+
+            prev_x = x as u16;
+            prev_y = current_y;
+        }
+        
+        prev_samples = samples;
+        
+
+        Timer::after(Duration::from_hz(1000)).await;
+
+        // display.set_pixel(sample_x_prev as u16,sample_y_prev as u16,Rgb565::BLACK );
     }
 }
